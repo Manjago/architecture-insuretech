@@ -1,0 +1,69 @@
+@startuml InsureTech_Deployment_To-Be
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Deployment.puml
+
+title Deployment Diagram - InsureTech (To-Be: High Availability)
+
+Deployment_Node(user_pc, "Компьютер пользователя", "Windows, macOS, Linux") {
+    Container(browser, "Браузер", "Chrome, Firefox, Safari")
+}
+
+Deployment_Node(cdn_provider, "CDN Provider", "Yandex CDN / CloudFront") {
+    Container(cdn_cache, "Edge Cache", "Static Assets", "Кэширование JS, CSS, IMG для регионов")
+}
+
+Deployment_Node(yandex_cloud, "Yandex Cloud", "Region: ru-central1") {
+    
+    Container(alb, "Application Load Balancer", "L7 Balancer", "Распределение трафика по зонам, SSL Termination")
+
+    ' --- Availability Zone A ---
+    Deployment_Node(zone_a, "Зона доступности A (ru-central1-a)") {
+        Deployment_Node(k8s_node_a, "K8s Node A") {
+            Container(app_pod_a, "App Pods", "Docker", "Replica Set")
+        }
+        Deployment_Node(db_vm_a, "DB Host A") {
+            ContainerDb(pg_master, "PostgreSQL Master", "Primary", "Read/Write")
+        }
+    }
+
+    ' --- Availability Zone B ---
+    Deployment_Node(zone_b, "Зона доступности B (ru-central1-b)") {
+        Deployment_Node(k8s_node_b, "K8s Node B") {
+            Container(app_pod_b, "App Pods", "Docker", "Replica Set")
+        }
+        Deployment_Node(db_vm_b, "DB Host B") {
+            ContainerDb(pg_replica_1, "PostgreSQL Replica", "Standby", "Read-Only / Failover Candidate")
+        }
+    }
+
+    ' --- Availability Zone C ---
+    Deployment_Node(zone_c, "Зона доступности C (ru-central1-c)") {
+        Deployment_Node(k8s_node_c, "K8s Node C") {
+            Container(app_pod_c, "App Pods", "Docker", "Replica Set")
+        }
+        Deployment_Node(db_vm_c, "DB Host C") {
+            ContainerDb(pg_replica_2, "PostgreSQL Replica", "Standby", "Read-Only / Failover Candidate")
+        }
+    }
+    
+    ContainerDb(s3_backup, "Object Storage (S3)", "Backup", "Хранение бэкапов и WAL-логов (PITR)")
+}
+
+' Relations
+Rel(browser, cdn_cache, "Загрузка статики", "HTTPS")
+Rel(browser, alb, "API запросы", "HTTPS")
+Rel(cdn_cache, alb, "Origin Pull", "HTTPS")
+
+Rel(alb, app_pod_a, "Round Robin", "HTTP")
+Rel(alb, app_pod_b, "Round Robin", "HTTP")
+Rel(alb, app_pod_c, "Round Robin", "HTTP")
+
+Rel(app_pod_a, pg_master, "Write", "TCP/5432")
+Rel(app_pod_b, pg_master, "Write", "TCP/5432")
+Rel(app_pod_c, pg_master, "Write", "TCP/5432")
+
+Rel(pg_master, pg_replica_1, "Sync Replication", "Wal Streaming")
+Rel(pg_master, pg_replica_2, "Async Replication", "Wal Streaming")
+
+Rel(pg_master, s3_backup, "Архивация WAL", "HTTPS")
+
+@enduml
