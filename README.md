@@ -14,7 +14,7 @@
 | :--- | :--- | :--- | :--- |
 | **Task 1** | **Технологическая архитектура (Deployment)** | ✅ Готово | [Схема To-Be](Task1/InsureTech_Deployment_To-Be.png), [ADR](Task1/ADR_Architecture.md) |
 | **Task 2** | **Динамическое масштабирование (K8s HPA)** | ✅ Готово | [Манифесты](Task2/), [Скриншоты](Task2/screenshots/) |
-| **Task 3** | Event-Driven Архитектура (EDA) | ⏳ Ожидает | |
+| **Task 3** | **Event-Driven Архитектура (EDA)** | ✅ Готово | [Анализ проблем](Task3/Analysis.md), [C4 To-Be](Task3/InsureTech_C4_EDA.png) |
 | **Task 4** | Отказоустойчивость (Resilience Patterns) | ⏳ Ожидает | |
 | **Task 5** | Проектирование GraphQL API | ⏳ Ожидает | |
 | **Task 6** | Настройка Rate Limiting (Nginx) | ⏳ Ожидает | |
@@ -63,6 +63,28 @@
 5.  ⚙️ [`Task2/prometheus-adapter-values.yaml`](Task2/prometheus-adapter-values.yaml) — Конфигурация Prometheus Adapter
 6.  🐍 [`Task2/locustfile.py`](Task2/locustfile.py) — Скрипт нагрузочного тестирования
 7.  📸 [`Task2/screenshots/`](Task2/screenshots/) — Скриншоты масштабирования и метрик
+
+---
+
+### Task 3. Переход на Event-Driven архитектуру
+
+**Проблема (As-Is):**
+Взаимодействие между сервисами построено на синхронном REST и polling. При росте числа страховых компаний с 5 до 10 — линейный рост латентности, каскадные отказы, устаревшие данные (до 15 мин для тарифов, до 24 ч для страховок). Суточный batch-запрос за оформленными страховками хрупок при росте объёмов.
+
+**Решение (To-Be):**
+Внедрение **Event-Driven Architecture** с Apache Kafka. Три взаимодействия переведены с REST polling на Event Streaming:
+
+*   **`products.updated` (Event-Carried State Transfer):** `ins-product-aggregator` по расписанию собирает тарифы из 10 компаний и публикует событие в Kafka. `core-app` и `ins-comp-settlement` подписаны — обновляют локальные реплики в near real-time (вместо polling каждые 15 мин / раз в сутки).
+*   **`insurance.issued` (ECST + Transactional Outbox):** `core-app` при оформлении страховки публикует событие через Transactional Outbox (атомарно с записью в БД). `ins-comp-settlement` получает данные в real-time (вместо суточного batch REST-запроса).
+
+**Transactional Outbox:** Применяется для `core-app` → `InsuranceIssued`. Событие пишется в outbox-таблицу в `core-db` в одной транзакции с бизнес-данными. Polling Publisher (1 сек) отправляет в Kafka. Consumer (`ins-comp-settlement`) идемпотентен.
+
+**Остаётся синхронным (REST):** Пользовательские запросы (Web → core-app), CRUD клиентских данных (Web/core-app → client-info), внешние API страховых компаний, оплата.
+
+**Артефакты:**
+1.  📝 **[Анализ проблем и рисков](Task3/Analysis.md)** — 5 проблем с оценкой приоритетов и предлагаемыми решениями.
+2.  🖼 **[Обновлённая C4-диаграмма контейнеров (To-Be)](Task3/InsureTech_C4_EDA.png)** — Event-Driven архитектура с Kafka, Outbox, ECST.
+3.  ⚙️ *Исходный код диаграммы:* [`Task3/InsureTech_C4_EDA.puml`](Task3/InsureTech_C4_EDA.puml)
 
 ---
 *Автор: Кирилл Темненков*

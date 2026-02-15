@@ -1,0 +1,142 @@
+@startuml InsureTech_C4_EDA
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title Container Diagram — InsureTech (To-Be: Event-Driven Architecture)
+
+' ============================================================
+'  ВНЕШНИЕ СИСТЕМЫ И АКТОРЫ
+' ============================================================
+Person(client, "Клиент", "Клиент InsureTech")
+
+System_Ext(payment_service, "Платёжный сервис", "Внешний платёжный сервис,\nчерез который осуществляется\nоплата страховок")
+
+System_Ext(partner_systems, "Системы партнёров", "Системы партнёров,\nинтегрирующие страховые\nуслуги в свои продукты")
+
+System_Ext(insurance_companies, "Системы страховых\nкомпаний (10)", "Предоставляют API для получения\nактуальных тарифов, андеррайтинга\nи оформления страховых продуктов")
+
+' ============================================================
+'  ГРАНИЦА СИСТЕМЫ INSURETECH
+' ============================================================
+System_Boundary(insuretech, "InsureTech") {
+
+    ' --- Фронтенд ---
+    Container(web_app, "InsureTech Web", "JavaScript, React", "Веб-приложение InsureTech")
+
+    ' --- Сервисы ---
+    Container(core_app, "core-app", "Kotlin, SpringBoot", "Монолитное приложение:\n- отображает доступные продукты\n- оформляет новые страховки\n- отображает купленные страховки\n- публикует InsuranceIssued\n  через Transactional Outbox")
+
+    Container(client_info, "client-info", "Kotlin, SpringBoot", "Сервис для учёта\nклиентских данных")
+
+    Container(product_aggregator, "ins-product-aggregator", "Kotlin, SpringBoot", "По расписанию собирает тарифы\nиз 10 страховых компаний\nи публикует ProductsUpdated\nв Kafka (push вместо pull)")
+
+    Container(settlement, "ins-comp-settlement", "Kotlin, SpringBoot", "Сервис для осуществления\nвзаиморасчётов со страховыми\nкомпаниями.\nПодписан на ProductsUpdated\nи InsuranceIssued")
+
+    ' --- Message Broker ---
+    ContainerQueue(kafka, "Apache Kafka", "Message Broker", "Event Streaming Platform.\nТопики: products.updated,\ninsurance.issued")
+
+    ' --- Базы данных ---
+    ContainerDb(core_db, "core-db", "PostgreSQL", "Хранение тарифов (локальная\nреплика), заявок клиентов\nна страховые продукты.\nСодержит outbox-таблицу")
+
+    ContainerDb(client_info_db, "client-info-db", "PostgreSQL", "Хранение данных клиентов:\nФИО, телефон, паспорт и др.\nИнформация необходима\nдля оформления страховок")
+
+    ContainerDb(settlement_db, "ins-comp-settlement-db", "PostgreSQL", "Хранение данных об\nоформленных страховках\nи условиях взаиморасчётов\nс клиентами")
+}
+
+' ============================================================
+'  ЗАМЕТКИ
+' ============================================================
+
+note as eda_note
+    **Event-Driven Architecture (To-Be)**
+
+    Три взаимодействия переведены с REST polling
+    на Event Streaming через Apache Kafka:
+
+    1. **products.updated** (ECST):
+       ins-product-aggregator → Kafka → core-app, settlement
+       Вместо polling каждые 15 мин / раз в сутки.
+
+    2. **insurance.issued** (ECST + Transactional Outbox):
+       core-app → Kafka → ins-comp-settlement
+       Вместо суточного batch REST-запроса.
+
+    Остальные взаимодействия остаются синхронными (REST).
+end note
+
+note as outbox_note
+    **Transactional Outbox (core-app)**
+
+    core-app пишет событие InsuranceIssued
+    в outbox-таблицу core-db в **той же
+    транзакции**, что и бизнес-данные.
+    Polling Publisher (1 сек) отправляет
+    события в Kafka.
+
+    Гарантия: at-least-once delivery.
+    Consumer (ins-comp-settlement)
+    **идемпотентен**.
+end note
+
+note as aggregator_note
+    **ins-product-aggregator (новая модель)**
+
+    Больше не обслуживает синхронные
+    REST-запросы от core-app / settlement.
+    Сам **по расписанию** собирает данные
+    из 10 страховых компаний и публикует
+    ProductsUpdated в Kafka.
+
+    Outbox **не нужен**: нет БД-транзакции,
+    данные идемпотентны (UPSERT тарифов).
+end note
+
+' ============================================================
+'  СВЯЗИ — СИНХРОННЫЕ (REST)
+' ============================================================
+
+' --- Клиент → Web ---
+Rel(client, web_app, "Использует", "HTTPS")
+
+' --- Web → сервисы ---
+Rel(web_app, core_app, "1. Получение тарифов\n2. Создание заявок на страховки", "REST")
+Rel(web_app, client_info, "Получение / сохранение\nинформации о клиентах", "REST")
+Rel(web_app, payment_service, "Проведение оплаты\nза страховки (redirect)", "HTTP")
+
+' --- core-app → синхронные зависимости ---
+Rel(core_app, client_info, "Получение / сохранение\nинформации о клиентах", "REST")
+Rel(core_app, payment_service, "Проведение оплаты\nза страховки", "HTTP")
+
+' --- Партнёры → core-app ---
+Rel(partner_systems, core_app, "Оформление страховок", "REST")
+
+' --- Сервисы → БД ---
+Rel(core_app, core_db, "Работа с данными\n+ Outbox-таблица", "TCP/5432")
+Rel(client_info, client_info_db, "Работа с данными", "TCP/5432")
+Rel(settlement, settlement_db, "Работа с данными", "TCP/5432")
+
+' --- ins-product-aggregator → внешние API (по расписанию) ---
+Rel(product_aggregator, insurance_companies, "Получение информации\nпо продуктам и тарифам\n(по расписанию)", "REST / SOAP / GraphQL")
+
+' --- ins-comp-settlement → внешние API ---
+Rel(settlement, insurance_companies, "Передача данных\nдля взаиморасчётов", "REST / SOAP / GraphQL")
+
+' ============================================================
+'  СВЯЗИ — АСИНХРОННЫЕ (EVENT STREAMING)
+' ============================================================
+
+' --- Publish ---
+Rel(product_aggregator, kafka, "Publish: ProductsUpdated", "Async, ECST")
+Rel(core_app, kafka, "Publish: InsuranceIssued", "via Transactional Outbox\n+ Polling Publisher")
+
+' --- Consume ---
+Rel(kafka, core_app, "Consume: ProductsUpdated", "Consumer Group: core-app")
+Rel(kafka, settlement, "Consume: ProductsUpdated,\nInsuranceIssued", "Consumer Group:\nins-comp-settlement")
+
+' ============================================================
+'  Привязка notes к элементам
+' ============================================================
+eda_note -[hidden]-> kafka
+outbox_note -[hidden]-> core_db
+aggregator_note -[hidden]-> product_aggregator
+
+@enduml
