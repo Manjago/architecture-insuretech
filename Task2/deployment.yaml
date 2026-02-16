@@ -1,0 +1,33 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: scaletestapp
+  labels:
+    app: scaletestapp
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: scaletestapp
+  template:
+    metadata:
+      labels:
+        app: scaletestapp
+      annotations:
+        # Prometheus автоматически найдёт и будет скрейпить этот под
+        prometheus.io/scrape: "true"
+        prometheus.io/port: "8080"
+        prometheus.io/path: "/metrics"
+    spec:
+      containers:
+        - name: scaletestapp
+          image: ghcr.io/yandex-practicum/scaletestapp:latest
+          ports:
+            - containerPort: 8080
+          resources:
+            requests:
+              memory: "20Mi"    # база для вычисления utilization в HPA
+              cpu: "50m"
+            limits:
+              memory: "30Mi"    # по заданию — лимит 30Mi
+              cpu: "200m"
