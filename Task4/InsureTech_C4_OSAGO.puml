@@ -1,0 +1,200 @@
+@startuml InsureTech_C4_OSAGO
+!include https://raw.githubusercontent.com/plantuml-stdlib/C4-PlantUML/master/C4_Container.puml
+
+title Container Diagram — InsureTech (To-Be: ОСАГО + Resilience Patterns)
+
+' ============================================================
+'  ЛЕГЕНДА ПАТТЕРНОВ ОТКАЗОУСТОЙЧИВОСТИ
+' ============================================================
+
+legend right
+  |= Обозначение |= Паттерн |
+  | ⏱ | Timeout |
+  | 🔄 | Retry |
+  | 🔒 | Circuit Breaker |
+  | 📊 | Rate Limiter |
+endlegend
+
+' ============================================================
+'  ВНЕШНИЕ СИСТЕМЫ И АКТОРЫ
+' ============================================================
+Person(client, "Клиент", "Клиент InsureTech")
+
+System_Ext(payment_service, "Платёжный сервис", "Внешний платёжный сервис,\nчерез который осуществляется\nоплата страховок")
+
+System_Ext(partner_systems, "Системы партнёров", "Системы партнёров,\nинтегрирующие страховые\nуслуги в свои продукты")
+
+System_Ext(insurance_companies, "Системы страховых\nкомпаний (10)", "Предоставляют API для получения\nактуальных тарифов, андеррайтинга\nи оформления страховых продуктов.\nОСАГО: POST заявка + GET предложение")
+
+' ============================================================
+'  ГРАНИЦА СИСТЕМЫ INSURETECH
+' ============================================================
+System_Boundary(insuretech, "InsureTech") {
+
+    ' --- Фронтенд ---
+    Container(web_app, "InsureTech Web", "JavaScript, React", "Веб-приложение InsureTech.\nОСАГО: отображает предложения\nв реальном времени через SSE")
+
+    ' --- Сервисы ---
+    Container(core_app, "core-app", "Kotlin, SpringBoot (JDK 25)", "Монолитное приложение:\n- отображает доступные продукты\n- оформляет новые страховки\n- ОСАГО: принимает заявку,\n  стримит предложения по SSE\n- публикует InsuranceIssued\n  через Transactional Outbox")
+
+    Container(client_info, "client-info", "Kotlin, SpringBoot", "Сервис для учёта\nклиентских данных")
+
+    Container(product_aggregator, "ins-product-aggregator", "Kotlin, SpringBoot", "По расписанию собирает тарифы\nиз 10 страховых компаний\nи публикует ProductsUpdated\nв Kafka (push вместо pull)")
+
+    Container(settlement, "ins-comp-settlement", "Kotlin, SpringBoot", "Сервис для осуществления\nвзаиморасчётов со страховыми\nкомпаниями.\nПодписан на ProductsUpdated\nи InsuranceIssued")
+
+    Container(osago_aggregator, "osago-aggregator", "Kotlin, SpringBoot (JDK 25)\nVirtual Threads", "Сервис ОСАГО:\n- Fan-out заявок в 10 СК\n- Polling решений (до 60 сек)\n- Fan-in: публикация предложений\n  в Kafka по мере поступления")
+
+    ' --- Message Broker ---
+    ContainerQueue(kafka, "Apache Kafka", "Message Broker", "Event Streaming Platform.\nТопики: products.updated,\ninsurance.issued,\nosago.proposal.received,\nosago.proposals.complete")
+
+    ' --- Базы данных ---
+    ContainerDb(core_db, "core-db", "PostgreSQL", "Хранение тарифов (локальная\nреплика), заявок клиентов\nна страховые продукты.\nСодержит outbox-таблицу.\nОСАГО: заявки и статусы")
+
+    ContainerDb(client_info_db, "client-info-db", "PostgreSQL", "Хранение данных клиентов:\nФИО, телефон, паспорт и др.\nИнформация необходима\nдля оформления страховок")
+
+    ContainerDb(settlement_db, "ins-comp-settlement-db", "PostgreSQL", "Хранение данных об\nоформленных страховках\nи условиях взаиморасчётов\nс клиентами")
+
+    ContainerDb(osago_state, "osago-state", "Redis", "Состояние ОСАГО-сессий:\nкакие СК ответили, какие\nещё в процессе, результаты.\nTTL: 5 мин (ephemeral data)")
+}
+
+' ============================================================
+'  ЗАМЕТКИ
+' ============================================================
+
+note as eda_note
+    **Event-Driven Architecture (To-Be)**
+
+    Три взаимодействия из Task 3 переведены
+    на Event Streaming через Apache Kafka:
+
+    1. **products.updated** (ECST):
+       ins-product-aggregator → Kafka → core-app, settlement.
+
+    2. **insurance.issued** (ECST + Transactional Outbox):
+       core-app → Kafka → ins-comp-settlement.
+
+    **Новое (Task 4 — ОСАГО):**
+
+    3. **osago.proposal.received** (Progressive Fan-in):
+       osago-aggregator → Kafka → core-app → SSE → Web.
+
+    4. **osago.proposals.complete** (завершение сессии):
+       osago-aggregator → Kafka → core-app → SSE "done".
+end note
+
+note as osago_note
+    **osago-aggregator (новый сервис)**
+
+    **Fan-out:** параллельная отправка заявок
+    в 10 страховых компаний (POST).
+
+    **Polling:** опрос решений по каждой СК
+    (GET, интервал 2–3 сек, до 60 сек).
+
+    **Fan-in:** по мере получения ответов
+    публикует события в Kafka.
+
+    **Стек:** Kotlin + Spring Boot + JDK 25
+    **Virtual Threads** — для масштабирования
+    до 25 000 in-flight запросов при
+    2 500 одновременных пользователях.
+
+    **State:** Redis (ephemeral, TTL 5 мин).
+end note
+
+note as resilience_note
+    **Паттерны отказоустойчивости**
+
+    **⏱ Timeout:**
+    - osago-aggregator → СК: 60 сек (бизнес)
+    - core-app → osago-aggregator: 5 сек
+    - ins-product-aggregator → СК: 30 сек
+
+    **🔄 Retry:**
+    - osago-aggregator → СК: до 3 попыток,
+      exp. backoff + jitter, в рамках 60 сек
+
+    **🔒 Circuit Breaker:**
+    - osago-aggregator → каждая СК:
+      threshold 50%, window 10, wait 30 сек.
+      Fallback: пропускаем СК.
+
+    **📊 Rate Limiter:**
+    - core-app (вход от партнёров):
+      Nginx L7 + Bucket4j/Redis
+end note
+
+note as sse_note
+    **SSE (Server-Sent Events)**
+
+    Web ← core-app: предложения ОСАГО
+    отображаются по мере поступления.
+
+    Поток конечный: ≤10 событий, ≤60 сек.
+    Встроенный reconnect (EventSource API).
+    Пиковая нагрузка: 2 500 SSE-соединений.
+end note
+
+' ============================================================
+'  СВЯЗИ — СИНХРОННЫЕ (REST)
+' ============================================================
+
+' --- Клиент → Web ---
+Rel(client, web_app, "Использует", "HTTPS")
+
+' --- Web → сервисы ---
+Rel(web_app, core_app, "1. Получение тарифов\n2. Создание заявок на страховки\n3. ОСАГО: подача заявки", "REST")
+Rel(web_app, client_info, "Получение / сохранение\nинформации о клиентах", "REST")
+Rel(web_app, payment_service, "Проведение оплаты\nза страховки (redirect)", "HTTP")
+
+' --- Web ← core-app: SSE для ОСАГО ---
+Rel(core_app, web_app, "ОСАГО: предложения\nв реальном времени", "SSE (text/event-stream)")
+
+' --- core-app → синхронные зависимости ---
+Rel(core_app, client_info, "Получение / сохранение\nинформации о клиентах", "REST")
+Rel(core_app, payment_service, "Проведение оплаты\nза страховки", "HTTP")
+
+' --- core-app → osago-aggregator ---
+Rel(core_app, osago_aggregator, "ОСАГО: создание заявки\n⏱ Timeout 5 сек", "REST")
+
+' --- Партнёры → core-app ---
+Rel(partner_systems, core_app, "Оформление страховок\n📊 Rate Limiter", "REST")
+
+' --- Сервисы → БД ---
+Rel(core_app, core_db, "Работа с данными\n+ Outbox-таблица", "TCP/5432")
+Rel(client_info, client_info_db, "Работа с данными", "TCP/5432")
+Rel(settlement, settlement_db, "Работа с данными", "TCP/5432")
+Rel(osago_aggregator, osago_state, "Состояние сессий", "TCP/6379")
+
+' --- osago-aggregator → страховые компании ---
+Rel(osago_aggregator, insurance_companies, "ОСАГО: Fan-out заявок\n+ Polling решений\n⏱ Timeout 60s\n🔄 Retry (3x, exp. backoff)\n🔒 Circuit Breaker", "REST")
+
+' --- ins-product-aggregator → внешние API ---
+Rel(product_aggregator, insurance_companies, "Получение информации\nпо продуктам и тарифам\n(по расписанию)\n⏱ Timeout 30s", "REST / SOAP / GraphQL")
+
+' --- ins-comp-settlement → внешние API ---
+Rel(settlement, insurance_companies, "Передача данных\nдля взаиморасчётов", "REST / SOAP / GraphQL")
+
+' ============================================================
+'  СВЯЗИ — АСИНХРОННЫЕ (EVENT STREAMING)
+' ============================================================
+
+' --- Publish ---
+Rel(product_aggregator, kafka, "Publish:\nProductsUpdated", "Async, ECST")
+Rel(core_app, kafka, "Publish:\nInsuranceIssued", "Transactional Outbox")
+Rel(osago_aggregator, kafka, "Publish:\nosago.proposal.received\nosago.proposals.complete", "Async, Progressive Fan-in")
+
+' --- Consume ---
+Rel(kafka, core_app, "Consume:\nProductsUpdated,\nosago.proposal.received,\nosago.proposals.complete", "Consumer Group:\ncore-app")
+Rel(kafka, settlement, "Consume:\nProductsUpdated,\nInsuranceIssued", "Consumer Group:\nins-comp-settlement")
+
+' ============================================================
+'  Привязка notes
+' ============================================================
+eda_note -[hidden]-> kafka
+osago_note -[hidden]-> osago_aggregator
+resilience_note -[hidden]-> osago_state
+sse_note -[hidden]-> web_app
+
+@enduml

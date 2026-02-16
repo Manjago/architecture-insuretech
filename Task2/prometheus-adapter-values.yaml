@@ -1,0 +1,20 @@
+# Конфигурация Prometheus Adapter для Task 2 (часть 2★)
+# Устанавливается командой:
+#   helm install prometheus-adapter prometheus-community/prometheus-adapter \
+#     --namespace monitoring -f prometheus-adapter-values.yaml
+
+prometheus:
+  url: http://prometheus-server.monitoring.svc
+  port: 80
+
+rules:
+  custom:
+    - seriesQuery: 'http_requests_total{namespace!="",pod!=""}'
+      resources:
+        overrides:
+          namespace: {resource: "namespace"}
+          pod: {resource: "pod"}
+      name:
+        matches: "^(.*)_total$"
+        as: "${1}_per_second"
+      metricsQuery: 'rate(<<.Series>>{<<.LabelMatchers>>}[2m])'
