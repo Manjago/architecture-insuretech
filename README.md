@@ -15,7 +15,7 @@
 | **Task 1** | **Технологическая архитектура (Deployment)** | ✅ Готово | [Схема To-Be](Task1/InsureTech_Deployment_To-Be.png), [ADR](Task1/ADR_Architecture.md) |
 | **Task 2** | **Динамическое масштабирование (K8s HPA)** | ✅ Готово | [Манифесты](Task2/), [Скриншоты](Task2/screenshots/) |
 | **Task 3** | **Event-Driven Архитектура (EDA)** | ✅ Готово | [Анализ проблем](Task3/Analysis.md), [C4 To-Be](Task3/InsureTech_C4_EDA.png) |
-| **Task 4** | Отказоустойчивость (Resilience Patterns) | ⏳ Ожидает | |
+| **Task 4** | **Проектирование продажи ОСАГО** | ✅ Готово | [Анализ решений](Task4/Analysis_OSAGO.md), [C4 ОСАГО](Task4/InsureTech_C4_OSAGO.png) |
 | **Task 5** | Проектирование GraphQL API | ⏳ Ожидает | |
 | **Task 6** | Настройка Rate Limiting (Nginx) | ⏳ Ожидает | |
 
@@ -85,6 +85,37 @@
 1.  📝 **[Анализ проблем и рисков](Task3/Analysis.md)** — 5 проблем с оценкой приоритетов и предлагаемыми решениями.
 2.  🖼 **[Обновлённая C4-диаграмма контейнеров (To-Be)](Task3/InsureTech_C4_EDA.png)** — Event-Driven архитектура с Kafka, Outbox, ECST.
 3.  ⚙️ *Исходный код диаграммы:* [`Task3/InsureTech_C4_EDA.puml`](Task3/InsureTech_C4_EDA.puml)
+
+---
+
+### Task 4. Проектирование продажи ОСАГО
+
+**Задача:**
+Запуск нового продукта — онлайн-оформление ОСАГО. Клиент заполняет заявку, система запрашивает предложения у 10 страховых компаний, предложения отображаются **в реальном времени** по мере поступления. Максимальное время ожидания — 60 секунд. Пиковая нагрузка — 2 500 одновременных пользователей.
+
+**Решение (To-Be):**
+Выделен новый сервис **osago-aggregator**, реализующий паттерн **Fan-out / Fan-in** с progressive-доставкой результатов через **SSE** и **Kafka**.
+
+*   **osago-aggregator** (Kotlin, Spring Boot, JDK 25, Virtual Threads): параллельно отправляет заявки в 10 страховых компаний (fan-out), опрашивает решения (polling, до 60 сек), публикует предложения в Kafka по мере поступления (progressive fan-in).
+*   **Хранилище:** Redis (ephemeral state, TTL 5 мин) — состояние ОСАГО-сессий: какие компании ответили, какие в процессе, результаты.
+*   **Интеграция osago-aggregator ↔ core-app:** REST (POST — создание заявки) + Kafka (асинхронно — результаты через топики `osago.proposal.received`, `osago.proposals.complete`).
+*   **Интеграция core-app ↔ Web:** SSE (Server-Sent Events) — предложения отображаются на экране по мере поступления. Поток конечный (≤10 событий, ≤60 сек), встроенный reconnect через EventSource API.
+*   **Virtual Threads (JDK 25 LTS):** обеспечивают масштабирование до 25 000 in-flight HTTP-запросов (2 500 пользователей × 10 компаний) без исчерпания пула потоков.
+
+**Паттерны отказоустойчивости:**
+
+| Паттерн | Где применяется | Параметры |
+| :--- | :--- | :--- |
+| ⏱ **Timeout** | osago-aggregator → СК | 60 сек (бизнес-требование) |
+| ⏱ **Timeout** | core-app → osago-aggregator | 5 сек (fire-and-forget) |
+| 🔄 **Retry** | osago-aggregator → СК | До 3 попыток, exp. backoff + jitter |
+| 🔒 **Circuit Breaker** | osago-aggregator → каждая СК | Threshold 50%, window 10, wait 30 сек |
+| 📊 **Rate Limiter** | core-app ← партнёры | Nginx L7 + Bucket4j/Redis |
+
+**Артефакты:**
+1.  📝 **[Анализ решений и обоснования](Task4/Analysis_OSAGO.md)** — 5 решений: реализация агрегатора, Redis, API, SSE, паттерны.
+2.  🖼 **[Обновлённая C4-диаграмма контейнеров (ОСАГО)](Task4/InsureTech_C4_OSAGO.png)** — osago-aggregator, Redis, SSE, Kafka-топики, обозначения паттернов.
+3.  ⚙️ *Исходный код диаграммы:* [`Task4/InsureTech_C4_OSAGO.puml`](Task4/InsureTech_C4_OSAGO.puml)
 
 ---
 *Автор: Кирилл Темненков*
